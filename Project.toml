@@ -1,0 +1,7 @@
+name = "CompareJuMPModels"
+uuid = "56defa34-84e9-4242-b525-bc494866c762"
+authors = ["hdavid16 <hperez16@gmail.com>"]
+version = "0.0.1"
+
+[deps]
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
