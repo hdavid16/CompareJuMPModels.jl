@@ -14,8 +14,6 @@ The following comparisons are made:
 The major assumption is that the variables have the same names in both models.
 Otherwise, the variables are assumed to be different.
 
-Author: Hector D. Perez (2023) - Operations Research Team
-
 ## Example Usage
 ```julia
 model1 = "./example/Small_A.mps"
