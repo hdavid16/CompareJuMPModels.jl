@@ -92,15 +92,22 @@ module CompareJuMPModels
                 println("Constraint types missing from model 2:\n\t", cmiss2)
             end
         end
-        ctypes = intersect(cons_types1, cons_types2)
-        for ctype in ctypes
+        for ctype in intersect(cons_types1, cons_types2)
             num_cons1 = num_constraints(m1, ctype...)
             num_cons2 = num_constraints(m2, ctype...)
             if num_cons1 != num_cons2
-                println("Number of constraints of type $(split(string(ctype[2]),".")[2]) differ: $num_cons1 vs $num_cons2")
+                println("Number of constraints of type $(split(string(ctype[2]),".")[2]) differ: $num_cons1 vs $num_cons2.")
             else
-                println("Both models have the same number of constraints of type $(split(string(ctype[2]),".")[2]): $num_cons1")
+                println("Both models have the same number of constraints of type $(split(string(ctype[2]),".")[2]): $num_cons1.")
             end
+        end
+        for ctype in setdiff(cons_types1, cons_types2)
+            num_cons1 = num_constraints(m1, ctype...)
+            println("Number of constraints of type $(split(string(ctype[2]),".")[2]) differ: $num_cons1 vs 0.")
+        end
+        for ctype in setdiff(cons_types2, cons_types1)
+            num_cons2 = num_constraints(m2, ctype...)
+            println("Number of constraints of type $(split(string(ctype[2]),".")[2]) differ: 0 vs $num_cons2.")
         end
         return cons_types1, cons_types2
     end
