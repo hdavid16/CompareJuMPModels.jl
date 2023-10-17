@@ -3,7 +3,97 @@ module CompareJuMPModels
 
     export get_variable_names, compare_variable_names, compare_variable_bounds
     export compare_constraint_types, compare_constraint_refs, compare_objective_functions
-    export run_model_comparisons
+    export compare_models, cannonicalize_model, transfer_constraints, transfer_variables
+
+    function transfer_variables(m, vnames)
+        for v in vnames
+            isnothing(variable_by_name(m,v)) && @variable(m, base_name=v)
+        end
+    end
+
+    function transfer_constraints(m, crefs)
+        for c in crefs
+            is_valid(m, c) && continue
+            skip_flag = false
+            cobj = constraint_object(c)
+            if cobj.func isa AffExpr
+                new_expr = zero(AffExpr)
+                for (v1, coeff) in cobj.func.terms
+                    v2 = variable_by_name(m, name(v1))
+                    if isnothing(v2)
+                        println("Constraint $c not transfered because variable $(name(v1)) is not in model 2.")
+                        skip_flag = true
+                    else
+                        add_to_expression!(new_expr, coeff * v2)
+                    end
+                end
+                add_to_expression!(new_expr, cobj.func.constant)
+            elseif cobj.func isa VariableRef
+                v2 = variable_by_name(m, name(cobj.func))
+                if isnothing(v2)
+                    println("Constraint $c not transfered because variable $(name(cobj.func)) is not in model 2.")
+                    skip_flag = true
+                else
+                    new_expr = v2
+                end
+            else
+                error("Constraint type $(typeof(c)) not supported yet. Only linear models are supported currently.")
+            end
+            !skip_flag && @constraint(m, new_expr in cobj.set)
+        end
+    end
+
+    function cannonicalize_model(m)
+        new_m = Model()
+        var_map = Dict{VariableRef,VariableRef}(
+            v => @variable(new_m, base_name=name(v))
+            for v in all_variables(m)
+        )
+        obj = objective_function(m)
+        sense = objective_sense(m)
+        if obj isa AffExpr
+            @objective(new_m, sense, sum(var_map[v] * obj.terms[v] for v in keys(obj.terms)) + obj.constant)
+        else
+            error("Objective type $(typeof(obj)) not supported yet. Only linear models are supported currently.")
+        end
+        for con in all_constraints(m, include_variable_in_set_constraints=true)
+            c = constraint_object(con)
+            if c.func isa VariableRef
+                new_expr = var_map[c.func]
+            elseif c.func isa AffExpr
+                new_expr = @expression(new_m, sum(var_map[v] * c.func.terms[v] for v in keys(c.func.terms)) + c.func.constant)
+            else
+                error("Constraint type $(typeof(c)) not supported yet. Only linear models are supported currently.")
+            end
+            if c.set isa MOI.GreaterThan
+                @constraint(new_m, -(new_expr - c.set.lower) in MOI.LessThan(0))
+            elseif c.set isa MOI.LessThan
+                @constraint(new_m, new_expr - c.set.upper in MOI.LessThan(0))
+            elseif c.set isa MOI.EqualTo
+                if c.func isa VariableRef
+                    @constraint(new_m, -(new_expr - c.set.value) in MOI.LessThan(0))
+                    @constraint(new_m, new_expr - c.set.value in MOI.LessThan(0))
+                elseif c.func isa AffExpr
+                    @constraint(new_m, new_expr - c.set.value in MOI.EqualTo(0))
+                else
+                    error("Constraint type $(typeof(c)) not supported yet. Only linear models are supported currently.")
+                end
+                # @constraint(new_m, -(new_expr - c.set.value) in MOI.LessThan(0))
+                # @constraint(new_m, new_expr - c.set.value in MOI.LessThan(0))
+            elseif c.set isa MOI.Interval
+                @constraint(new_m, -(new_expr - c.set.lower) in MOI.LessThan(0))
+                @constraint(new_m, new_expr - c.set.upper in MOI.LessThan(0))
+            elseif c.set isa MOI.ZeroOne
+                set_binary(new_expr)
+            elseif c.set isa MOI.Integer
+                set_integer(new_expr)
+            else
+                error("Constraint type $(typeof(c)) not supported yet. Only mixed binary linear models are supported currently.")
+            end
+        end
+
+        return new_m
+    end
 
     function get_variable_names(m1, m2)
         #extract variables from the models
@@ -96,18 +186,18 @@ module CompareJuMPModels
             num_cons1 = num_constraints(m1, ctype...)
             num_cons2 = num_constraints(m2, ctype...)
             if num_cons1 != num_cons2
-                println("Number of constraints of type $(split(string(ctype[2]),".")[2]) differ: $num_cons1 vs $num_cons2.")
+                println("Number of constraints of type $(ctype[1]) in $(split(string(ctype[2]),".")[2]) differ: $num_cons1 vs $num_cons2.")
             else
-                println("Both models have the same number of constraints of type $(split(string(ctype[2]),".")[2]): $num_cons1.")
+                println("Both models have the same number of constraints of type $(ctype[1]) in $(split(string(ctype[2]),".")[2]): $num_cons1.")
             end
         end
         for ctype in setdiff(cons_types1, cons_types2)
             num_cons1 = num_constraints(m1, ctype...)
-            println("Number of constraints of type $(split(string(ctype[2]),".")[2]) differ: $num_cons1 vs 0.")
+            println("Number of constraints of type $(ctype[1]) in $(split(string(ctype[2]),".")[2]) differ: $num_cons1 vs 0.")
         end
         for ctype in setdiff(cons_types2, cons_types1)
             num_cons2 = num_constraints(m2, ctype...)
-            println("Number of constraints of type $(split(string(ctype[2]),".")[2]) differ: 0 vs $num_cons2.")
+            println("Number of constraints of type $(ctype[1]) in $(split(string(ctype[2]),".")[2]) differ: 0 vs $num_cons2.")
         end
         return cons_types1, cons_types2
     end
@@ -226,7 +316,7 @@ module CompareJuMPModels
         )
     end
 
-    function run_model_comparisons(m1, m2;
+    function compare_models(m1, m2;
         variable_names=true,
         variable_bounds=true,
         constraint_types=true,
