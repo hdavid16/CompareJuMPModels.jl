@@ -74,17 +74,19 @@ module CompareJuMPModels
                     @constraint(new_m, -(new_expr - c.set.value) in MOI.LessThan(0))
                     @constraint(new_m, new_expr - c.set.value in MOI.LessThan(0))
                 elseif c.func isa AffExpr
-                    @constraint(new_m, new_expr - c.set.value in MOI.EqualTo(0))
+                    # @constraint(new_m, new_expr - c.set.value in MOI.EqualTo(0))
+                    @constraint(new_m, -(new_expr - c.set.value) in MOI.LessThan(0))
+                    @constraint(new_m, new_expr - c.set.value in MOI.LessThan(0))
                 else
                     error("Constraint type $(typeof(c)) not supported yet. Only linear models are supported currently.")
                 end
-                # @constraint(new_m, -(new_expr - c.set.value) in MOI.LessThan(0))
-                # @constraint(new_m, new_expr - c.set.value in MOI.LessThan(0))
             elseif c.set isa MOI.Interval
                 @constraint(new_m, -(new_expr - c.set.lower) in MOI.LessThan(0))
                 @constraint(new_m, new_expr - c.set.upper in MOI.LessThan(0))
             elseif c.set isa MOI.ZeroOne
                 set_binary(new_expr)
+                # @constraint(new_m, new_expr in MOI.LessThan(1))
+                # @constraint(new_m, -new_expr in MOI.LessThan(0))
             elseif c.set isa MOI.Integer
                 set_integer(new_expr)
             else
