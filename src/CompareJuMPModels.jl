@@ -1,5 +1,5 @@
 module CompareJuMPModels
-    using JuMP
+    using JuMP, DataFrames
 
     export get_variable_names, compare_variable_names, compare_variable_bounds
     export compare_constraint_types, compare_constraint_refs, compare_objective_functions
@@ -274,18 +274,19 @@ module CompareJuMPModels
         error("Constraint type $(type(con)) not supported yet. Comparisons are currently only performed on linear models.")
     end
 
-    function compare_objective_functions(m1, m2)
+    function compare_objective_functions(m1, m2; atol)
         println("Comparing objective functions...")
         obj1 = objective_function(m1)
         obj2 = objective_function(m2)    
         obj1_dict = objective_to_dict(obj1)
         obj2_dict = objective_to_dict(obj2)
-        if obj1_dict == obj2_dict
+        obj_diff = objective_diff(obj1_dict, obj2_dict; atol)
+        if isempty(obj_diff)
             println("Objective functions are the same.")
         else
-            println("Objective functions are different.")
+            println("Objective functions are different. $(nrow(obj_diff)) variables differ.")
         end
-        return obj1, obj2
+        return obj1, obj2, obj_diff
     end
 
     function objective_to_dict(obj::AffExpr)
@@ -301,6 +302,19 @@ module CompareJuMPModels
         error("Objective type $(type(obj)) not supported yet. Comparisons are currently only performed on linear models.")
     end
 
+    function objective_diff(obj1_dict, obj2_dict; atol)
+        df1 = DataFrame(
+            Variable = collect(keys(obj1_dict)),
+            Model1 = collect(values(obj1_dict))
+        )
+        df2 = DataFrame(
+            Variable = collect(keys(obj2_dict)),
+            Model2 = collect(values(obj2_dict))
+        )
+        dfjoin = leftjoin(df1, df2, on=:Variable)
+        return subset(dfjoin, [:Model1,:Model2] => ByRow((i,j) -> ismissing(j) || !isapprox(i,j;atol)))
+    end
+
     mutable struct ModelDiffs
         variables_missing_1
         variables_missing_2
@@ -308,13 +322,15 @@ module CompareJuMPModels
         variable_ub_diff
         constraints_missing_1
         constraints_missing_2
+        objective_diff
         ModelDiffs() = new(
             Set(),
             Set(),
             [],
             [],
             [],
-            []
+            [],
+            DataFrame()
         )
     end
 
@@ -324,7 +340,8 @@ module CompareJuMPModels
         constraint_types=true,
         constraint_refs=true,
         objective_functions=true,
-        verbose=true
+        verbose=true,
+        atol=1e-9
     )
         diff = ModelDiffs()
         if variable_names
@@ -350,7 +367,8 @@ module CompareJuMPModels
             println()
         end
         if objective_functions
-            compare_objective_functions(m1, m2)
+            _, _, obj_diff = compare_objective_functions(m1, m2; atol)
+            diff.objective_diff = obj_diff
             println()
         end
         return diff
