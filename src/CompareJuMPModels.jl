@@ -1,9 +1,7 @@
 module CompareJuMPModels
     using JuMP, DataFrames
 
-    export get_variable_names, compare_variable_names, compare_variable_bounds
-    export compare_constraint_types, compare_constraint_refs, compare_objective_functions
-    export compare_models, cannonicalize_model, transfer_constraints, transfer_variables
+    export compare_models
 
     function transfer_variables(m, vnames)
         for v in vnames
@@ -257,8 +255,8 @@ module CompareJuMPModels
         for (v, coeff) in cobj.func.terms
             cdict[name(v)] = round(coeff, digits=6)
         end
-        cdict["CONSTRAINT_constant"] = cobj.func.constant
-        cdict["MOI_set"] = cobj.set
+        cdict["CONSTRAINT_constant"] = round(cobj.func.constant, digits=6)
+        cdict["MOI_set"] = constraint_set(cobj.set)
         return cdict
     end
 
@@ -266,9 +264,13 @@ module CompareJuMPModels
         cobj = constraint_object(con)
         cdict = Dict{String,Any}()
         cdict[name(cobj.func)] = 1
-        cdict["MOI_set"] = cobj.set
+        cdict["MOI_set"] = constraint_set(cobj.set)
         return cdict
     end
+
+    constraint_set(set::MOI.LessThan) = MOI.LessThan(round(set.upper,digits=6))
+    constraint_set(set::MOI.ZeroOne) = MOI.ZeroOne()
+    constraint_set(set) = error("Constraint set type $(typeof(set)) not supported yet.")
 
     function constraint_to_dict(con)
         error("Constraint type $(type(con)) not supported yet. Comparisons are currently only performed on linear models.")
@@ -286,7 +288,14 @@ module CompareJuMPModels
         else
             println("Objective functions are different. $(nrow(obj_diff)) variables differ.")
         end
-        return obj1, obj2, obj_diff
+        if termination_status(m1) == OPTIMAL && termination_status(m2) == OPTIMAL
+            obj1_dict_vals = objective_to_dict_values(obj1)
+            obj2_dict_vals = objective_to_dict_values(obj2)
+            obj_vals_diff = objective_diff(obj1_dict_vals, obj2_dict_vals; atol)
+        else
+            obj_vals_diff = DataFrame()
+        end
+        return obj1, obj2, obj_diff, obj_vals_diff
     end
 
     function objective_to_dict(obj::AffExpr)
@@ -302,6 +311,19 @@ module CompareJuMPModels
         error("Objective type $(type(obj)) not supported yet. Comparisons are currently only performed on linear models.")
     end
 
+    function objective_to_dict_values(obj::AffExpr)
+        odict = Dict{String,Any}()
+        for (v, _) in obj.terms
+            odict[name(v)] = round(value(v), digits=6)
+        end
+        odict["CONSTRAINT_constant"] = obj.constant
+        return odict
+    end
+
+    function objective_to_dict_values(obj)
+        error("Objective type $(type(obj)) not supported yet. Comparisons are currently only performed on linear models.")
+    end
+
     function objective_diff(obj1_dict, obj2_dict; atol)
         df1 = DataFrame(
             Variable = collect(keys(obj1_dict)),
@@ -311,8 +333,8 @@ module CompareJuMPModels
             Variable = collect(keys(obj2_dict)),
             Model2 = collect(values(obj2_dict))
         )
-        dfjoin = leftjoin(df1, df2, on=:Variable)
-        return subset(dfjoin, [:Model1,:Model2] => ByRow((i,j) -> ismissing(j) || !isapprox(i,j;atol)))
+        dfjoin = outerjoin(df1, df2, on=:Variable)
+        return subset(dfjoin, [:Model1,:Model2] => ByRow((i,j) -> ismissing(i) || ismissing(j) || !isapprox(i,j;atol)))
     end
 
     mutable struct ModelDiffs
@@ -323,6 +345,7 @@ module CompareJuMPModels
         constraints_missing_1
         constraints_missing_2
         objective_diff
+        objective_variable_values
         ModelDiffs() = new(
             Set(),
             Set(),
@@ -330,11 +353,13 @@ module CompareJuMPModels
             [],
             [],
             [],
+            DataFrame(),
             DataFrame()
         )
     end
 
-    function compare_models(m1, m2;
+    function compare_models(model1, model2;
+        optimizer=missing,
         variable_names=true,
         variable_bounds=true,
         constraint_types=true,
@@ -344,6 +369,14 @@ module CompareJuMPModels
         atol=1e-9
     )
         diff = ModelDiffs()
+        m1 = cannonicalize_model(model1)
+        m2 = cannonicalize_model(model2)
+        if !ismissing(optimizer)
+            set_optimizer(m1, optimizer)
+            set_optimizer(m2, optimizer)
+            optimize!(m1)
+            optimize!(m2)
+        end
         if variable_names
             vmiss1, vmiss2 = compare_variable_names(m1, m2; verbose=false)
             diff.variables_missing_1 = vmiss1
@@ -367,8 +400,9 @@ module CompareJuMPModels
             println()
         end
         if objective_functions
-            _, _, obj_diff = compare_objective_functions(m1, m2; atol)
+            _, _, obj_diff, obj_vals = compare_objective_functions(m1, m2; atol)
             diff.objective_diff = obj_diff
+            diff.objective_variable_values = obj_vals
             println()
         end
         return diff
