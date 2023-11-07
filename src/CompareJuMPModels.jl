@@ -270,6 +270,7 @@ module CompareJuMPModels
 
     constraint_set(set::MOI.LessThan) = MOI.LessThan(round(set.upper,digits=6))
     constraint_set(set::MOI.ZeroOne) = MOI.ZeroOne()
+    constraint_set(set::MOI.Integer) = MOI.Integer()
     constraint_set(set) = error("Constraint set type $(typeof(set)) not supported yet.")
 
     function constraint_to_dict(con)
