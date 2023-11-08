@@ -406,6 +406,6 @@ module CompareJuMPModels
             diff.objective_variable_values = obj_vals
             println()
         end
-        return diff
+        return diff, m1, m2
     end
 end
