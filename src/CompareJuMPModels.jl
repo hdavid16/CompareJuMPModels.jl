@@ -60,6 +60,10 @@ module CompareJuMPModels
                 new_expr = var_map[c.func]
             elseif c.func isa AffExpr
                 new_expr = @expression(new_m, sum(var_map[v] * c.func.terms[v] for v in keys(c.func.terms)) + c.func.constant)
+            elseif c.set isa MOI.SOS1
+                new_expr = [var_map[v] for v in c.func]
+            elseif c.set isa MOI.Indicator
+                new_expr = [var_map[collect(keys(v.terms))[1]] for v in c.func]
             else
                 error("Constraint type $(typeof(c)) not supported yet. Only linear models are supported currently.")
             end
@@ -87,6 +91,10 @@ module CompareJuMPModels
                 # @constraint(new_m, -new_expr in MOI.LessThan(0))
             elseif c.set isa MOI.Integer
                 set_integer(new_expr)
+            elseif c.set isa MOI.SOS1
+                @constraint(new_m, new_expr in SOS1())
+            elseif c.set isa MOI.Indicator
+                @constraint(new_m, new_expr in c.set)
             else
                 error("Constraint type $(typeof(c)) not supported yet. Only mixed binary linear models are supported currently.")
             end
@@ -126,7 +134,7 @@ module CompareJuMPModels
         return miss1, miss2
     end
 
-    function compare_variable_bounds(m1, m2; verbose=false)
+    function compare_variable_bounds(m1, m2; verbose, scale_factor)
         println("Comparing variable bounds...")
         varnames1, varnames2 = get_variable_names(m1, m2)
         varnames = intersect(varnames1, varnames2)
@@ -134,12 +142,12 @@ module CompareJuMPModels
         for vname in varnames
             v1 = variable_by_name(m1, vname)
             v2 = variable_by_name(m2, vname)
-            if has_lower_bound(v1) && has_lower_bound(v2) && (lower_bound(v1) != lower_bound(v2))
+            if has_lower_bound(v1) && has_lower_bound(v2) && (lower_bound(v1) != lower_bound(v2) * (is_binary(v2) ? 1 : scale_factor))
                 push!(lbdiff, vname)
             elseif !has_lower_bound(v1) ⊻ !has_lower_bound(v2)
                 push!(lbdiff, vname)
             end
-            if has_upper_bound(v1) && has_upper_bound(v2) && (upper_bound(v1) != upper_bound(v2))
+            if has_upper_bound(v1) && has_upper_bound(v2) && (upper_bound(v1) != upper_bound(v2) * (is_binary(v2) ? 1 : scale_factor))
                 push!(ubdiff, vname)
             elseif !has_upper_bound(v1) ⊻ !has_upper_bound(v2)
                 push!(ubdiff, vname)
@@ -186,7 +194,7 @@ module CompareJuMPModels
             num_cons1 = num_constraints(m1, ctype...)
             num_cons2 = num_constraints(m2, ctype...)
             if num_cons1 != num_cons2
-                println("Number of constraints of type $(ctype[1]) in $(split(string(ctype[2]),".")[2]) differ: $num_cons1 vs $num_cons2.")
+                println("Number of constraints of type $(ctype[1]) in $(split(split(string(ctype[2]),".")[2],"{")[1]) differ: $num_cons1 vs $num_cons2.")
             else
                 println("Both models have the same number of constraints of type $(ctype[1]) in $(split(string(ctype[2]),".")[2]): $num_cons1.")
             end
@@ -202,27 +210,43 @@ module CompareJuMPModels
         return cons_types1, cons_types2
     end
 
-    function compare_constraint_refs(m1, m2; verbose=false)
+    function compare_constraint_refs(m1, m2; verbose, scale_factor)
         println("Comparing individual constraints...")
         cons1 = all_constraints(m1, include_variable_in_set_constraints=true)
         cons2 = all_constraints(m2, include_variable_in_set_constraints=true)
         #map constraint objects to constraint indices
-        cobjs_map1 = Dict(
-            constraint_to_dict(con) => con.index
-            for con in cons1
+        cobjs_map1 = Dict{Dict{String,Any},Vector{MOI.ConstraintIndex}}(
+            # constraint_to_dict(con) => con.index
+            # for con in cons1
         )
-        cobjs_map2 = Dict(
-            constraint_to_dict(con) => con.index
-            for con in cons2
+        cobjs_map2 = Dict{Dict{String,Any},Vector{MOI.ConstraintIndex}}(
+            # constraint_to_dict(con) => con.index
+            # for con in cons2
         )
+        for con in cons1
+            cdict = constraint_to_dict(con; scale_factor = 1)
+            if haskey(cobjs_map1, cdict)
+                push!(cobjs_map1[cdict], con.index)
+            else
+                cobjs_map1[cdict] = [con.index]
+            end
+        end
+        for con in cons2
+            cdict = constraint_to_dict(con; scale_factor)
+            if haskey(cobjs_map2, cdict)
+                push!(cobjs_map2[cdict], con.index)
+            else
+                cobjs_map2[cdict] = [con.index]
+            end
+        end
         #get differences between constraint objects
         cobjs1 = keys(cobjs_map1)
         cobjs2 = keys(cobjs_map2)
         cobj_diff1 = setdiff(cobjs2, cobjs1)
         cobj_diff2 = setdiff(cobjs1, cobjs2)
         #get constraint indices
-        cidx_miss1 = [cobjs_map2[k] for k in cobj_diff1]
-        cidx_miss2 = [cobjs_map1[k] for k in cobj_diff2]
+        cidx_miss1 = vcat([cobjs_map2[k] for k in cobj_diff1]...)
+        cidx_miss2 = vcat([cobjs_map1[k] for k in cobj_diff2]...)
         cref_miss1 = constraint_ref_with_index.(m2,cidx_miss1)
         cref_miss2 = constraint_ref_with_index.(m1,cidx_miss2)
 
@@ -249,40 +273,51 @@ module CompareJuMPModels
         return cref_miss1, cref_miss2
     end
 
-    function constraint_to_dict(con::ConstraintRef{Model, MOI.ConstraintIndex{MOI.ScalarAffineFunction{U}, T}, S}) where {U,T,S}
+    function constraint_to_dict(con::ConstraintRef{Model, MOI.ConstraintIndex{MOI.ScalarAffineFunction{U}, T}, S}; scale_factor) where {U,T,S}
         cobj = constraint_object(con)
         cdict = Dict{String,Any}()
-        for (v, coeff) in cobj.func.terms
-            cdict[name(v)] = round(coeff, digits=6)
+        if all(is_binary.(filter(i -> !contains(string(i),"sel!"),keys(cobj.func.terms))))
+            scale_factor = 1
         end
-        cdict["CONSTRAINT_constant"] = round(cobj.func.constant, digits=6)
-        cdict["MOI_set"] = constraint_set(cobj.set)
+        for (v, coeff) in cobj.func.terms
+            cdict[name(v)] = round(coeff / (is_binary(v) ? scale_factor : 1), sigdigits=4)
+        end
+        cdict["CONSTRAINT_constant"] = round(cobj.func.constant / scale_factor, sigdigits=4)
+        cdict["MOI_set"] = constraint_set(cobj.set; scale_factor)
         return cdict
     end
 
-    function constraint_to_dict(con::ConstraintRef{Model, MOI.ConstraintIndex{MOI.VariableIndex, T}, S}) where {T,S}
+    function constraint_to_dict(con::ConstraintRef{Model, MOI.ConstraintIndex{MOI.VariableIndex, T}, S}; scale_factor) where {T,S}
         cobj = constraint_object(con)
         cdict = Dict{String,Any}()
         cdict[name(cobj.func)] = 1
-        cdict["MOI_set"] = constraint_set(cobj.set)
+        cdict["MOI_set"] = constraint_set(cobj.set; scale_factor = (is_binary(cobj.func) ? 1 : scale_factor))
         return cdict
     end
 
-    constraint_set(set::MOI.LessThan) = MOI.LessThan(round(set.upper,digits=6))
-    constraint_set(set::MOI.ZeroOne) = MOI.ZeroOne()
-    constraint_set(set::MOI.Integer) = MOI.Integer()
-    constraint_set(set) = error("Constraint set type $(typeof(set)) not supported yet.")
-
-    function constraint_to_dict(con)
-        error("Constraint type $(type(con)) not supported yet. Comparisons are currently only performed on linear models.")
+    function constraint_to_dict(con::ConstraintRef{Model, MOI.ConstraintIndex{MOI.VectorOfVariables, T}, S}; scale_factor) where {T,S}
+        cobj = constraint_object(con)
+        cdict = Dict{String,Any}()
+        for v in cobj.func
+            cdict[name(v)] = 1
+        end
+        cdict["MOI_set"] = constraint_set(cobj.set; scale_factor)
+        return cdict
     end
 
-    function compare_objective_functions(m1, m2; rtol)
+    constraint_set(set::MOI.LessThan; scale_factor) = MOI.LessThan(round(set.upper / scale_factor,sigdigits=4))
+    constraint_set(set; scale_factor) = set
+
+    function constraint_to_dict(con; scale_factor)
+        error("Constraint type $(typeof(con)) not supported yet. Comparisons are currently only performed on linear models.")
+    end
+
+    function compare_objective_functions(m1, m2; rtol, scale_factor)
         println("Comparing objective functions...")
         obj1 = objective_function(m1)
-        obj2 = objective_function(m2)    
-        obj1_dict = objective_to_dict(obj1)
-        obj2_dict = objective_to_dict(obj2)
+        obj2 = objective_function(m2)
+        obj1_dict = objective_to_dict(obj1; scale_factor=1)
+        obj2_dict = objective_to_dict(obj2; scale_factor)
         obj_diff = objective_diff(obj1_dict, obj2_dict; rtol)
         if isempty(obj_diff)
             println("Objective functions are the same.")
@@ -290,8 +325,8 @@ module CompareJuMPModels
             println("Objective functions are different. $(nrow(obj_diff)) variables differ.")
         end
         if termination_status(m1) == OPTIMAL && termination_status(m2) == OPTIMAL
-            obj1_dict_vals = objective_to_dict_values(obj1)
-            obj2_dict_vals = objective_to_dict_values(obj2)
+            obj1_dict_vals = objective_to_dict_values(obj1; scale_factor=1)
+            obj2_dict_vals = objective_to_dict_values(obj2; scale_factor)
             obj_vals_diff = objective_diff(obj1_dict_vals, obj2_dict_vals; rtol)
         else
             obj_vals_diff = DataFrame()
@@ -299,29 +334,29 @@ module CompareJuMPModels
         return obj1, obj2, obj_diff, obj_vals_diff
     end
 
-    function objective_to_dict(obj::AffExpr)
+    function objective_to_dict(obj::AffExpr; scale_factor)
         odict = Dict{String,Any}()
         for (v, coeff) in obj.terms
-            odict[name(v)] = round(coeff, digits=6)
+            odict[name(v)] = round(coeff * (is_binary(v) ? 1 : scale_factor), sigdigits=4)
         end
-        odict["CONSTRAINT_constant"] = obj.constant
+        odict["CONSTRAINT_constant"] = round(obj.constant * scale_factor, sigdigits=4)
         return odict
     end
 
-    function objective_to_dict(obj)
+    function objective_to_dict(obj; scale_factor)
         error("Objective type $(type(obj)) not supported yet. Comparisons are currently only performed on linear models.")
     end
 
-    function objective_to_dict_values(obj::AffExpr)
+    function objective_to_dict_values(obj::AffExpr; scale_factor)
         odict = Dict{String,Any}()
         for (v, _) in obj.terms
-            odict[name(v)] = round(value(v), digits=6)
+            odict[name(v)] = round(value(v) / (is_binary(v) ? 1 : scale_factor), sigdigits=4)
         end
-        odict["CONSTRAINT_constant"] = obj.constant
+        odict["CONSTRAINT_constant"] = round(obj.constant / scale_factor, sigdigits=4)
         return odict
     end
 
-    function objective_to_dict_values(obj)
+    function objective_to_dict_values(obj; scale_factor)
         error("Objective type $(type(obj)) not supported yet. Comparisons are currently only performed on linear models.")
     end
 
@@ -367,7 +402,8 @@ module CompareJuMPModels
         constraint_refs=true,
         objective_functions=true,
         verbose=false,
-        rtol=1e-6
+        rtol=1e-6,
+        scale_factor=1
     )
         diff = ModelDiffs()
         m1 = cannonicalize_model(model1)
@@ -385,7 +421,7 @@ module CompareJuMPModels
             println()
         end
         if variable_bounds
-            lb_diff, ub_diff = compare_variable_bounds(m1, m2; verbose)
+            lb_diff, ub_diff = compare_variable_bounds(m1, m2; verbose, scale_factor)
             diff.variable_lb_diff = lb_diff
             diff.variable_ub_diff = ub_diff
             println()
@@ -395,13 +431,13 @@ module CompareJuMPModels
             println()
         end
         if constraint_refs
-            cref_diff1, cref_diff2 = compare_constraint_refs(m1, m2; verbose)
+            cref_diff1, cref_diff2 = compare_constraint_refs(m1, m2; verbose, scale_factor)
             diff.constraints_missing_1 = cref_diff1
             diff.constraints_missing_2 = cref_diff2
             println()
         end
         if objective_functions
-            _, _, obj_diff, obj_vals = compare_objective_functions(m1, m2; rtol)
+            _, _, obj_diff, obj_vals = compare_objective_functions(m1, m2; rtol, scale_factor)
             diff.objective_diff = obj_diff
             diff.objective_variable_values = obj_vals
             println()
