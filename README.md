@@ -1,8 +1,9 @@
 # CompareJuMPModels.jl
 
 This package below will compare two JuMP models, which can either be 
-created directly in JuMP or loaded from a model file (e.g., MPS). 
+created directly in JuMP or loaded from a model file (e.g., LP, MPS). 
 The following comparisons are made:
+
     1. Variable names
     2. Variable bounds
     3. Constraint types
